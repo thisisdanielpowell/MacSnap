@@ -1,8 +1,10 @@
 // WindowMover.swift
 // Moves and resizes windows through the macOS Accessibility API: the focused window for snapping,
-// several windows for arranging. It reads and sets two attributes per window, position and size,
-// and nothing else: no window contents, no clicks, no typing. After a move it reports where the
-// windows landed, for the orange highlight.
+// several windows for arranging. It reads and sets two attributes per window, position and size.
+// Where another program has an app's "enhanced user interface" setting on, it switches that setting
+// off for the moment of a move and straight back on (see `setFrame`). Nothing else: no window
+// contents, no clicks, no typing. After a move it reports where the windows landed, for the orange
+// highlight.
 
 import ApplicationServices
 import Cocoa
@@ -101,16 +103,44 @@ final class WindowMover {
     /// Sets a window's frame. Returns false if the app refused any part of it.
     /// Size is set before and after the move: some apps limit size to the screen the window is on,
     /// so the second size call lands it correctly after a move between displays.
+    /// While another program has the app's "enhanced user interface" setting on, the app animates each
+    /// of these changes, and a change sent during the animation cancels the one before it: a snap that
+    /// both moves and resizes then lands in the wrong place. So where the setting is on, it is switched
+    /// off for these three requests and straight back on. It is never switched on where it was off.
     private func setFrame(_ rect: CGRect, of window: AXUIElement) -> Bool {
         var size: CGSize = rect.size
         var position: CGPoint = rect.origin
         guard let sizeValue: AXValue = AXValueCreate(.cgSize, &size),
               let positionValue: AXValue = AXValueCreate(.cgPoint, &position)
         else { return false }
+        let animatingApp: AXUIElement? = appWithEnhancedUserInterface(of: window)
+        if let animatingApp { setEnhancedUserInterface(false, for: animatingApp) }
+        defer { if let animatingApp { setEnhancedUserInterface(true, for: animatingApp) } }
         _ = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
         let moved: AXError = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
         let sized: AXError = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
         return moved == .success && sized == .success
+    }
+
+    // MARK: - Enhanced user interface
+
+    /// The setting's name. Apple has not published it. Screen readers and some other tools switch it
+    /// on for an app, and the app then animates window changes made through the Accessibility API.
+    private static let enhancedUserInterface: String = "AXEnhancedUserInterface"
+
+    /// Returns the window's app if it has "enhanced user interface" switched on, or nil otherwise.
+    private func appWithEnhancedUserInterface(of window: AXUIElement) -> AXUIElement? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(window, &pid) == .success else { return nil }
+        let app: AXUIElement = AXUIElementCreateApplication(pid)
+        return AX.bool(app, Self.enhancedUserInterface) == true ? app : nil
+    }
+
+    /// Switches "enhanced user interface" on or off for an app. The answer is not checked: apps answer
+    /// "not implemented" to this request even when it has worked (seen with Finder, iTerm2, Chrome and
+    /// plain AppKit apps on macOS 27.2), so the answer says nothing either way.
+    private func setEnhancedUserInterface(_ on: Bool, for app: AXUIElement) {
+        _ = AXUIElementSetAttributeValue(app, Self.enhancedUserInterface as CFString, on ? kCFBooleanTrue : kCFBooleanFalse)
     }
 
     // MARK: - Screens
